@@ -508,12 +508,12 @@ def process():
         return jsonify(error="An Anthropic API key is required."), 400
 
     job_dir = tempfile.mkdtemp(prefix="podcut_")
-    audio_path = os.path.join(job_dir, audio.filename)
-    script_path = os.path.join(job_dir, script.filename)
+    ext = Path(audio.filename).suffix or ".mp3"
+    audio_path = os.path.join(job_dir, "audio" + ext)
+    script_path = os.path.join(job_dir, "script.docx")
     audio.save(audio_path)
     script.save(script_path)
 
-    ext = Path(audio.filename).suffix or ".mp3"
     output_path = os.path.join(job_dir, "cleaned" + ext)
 
     job_id = str(uuid.uuid4())
