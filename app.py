@@ -226,6 +226,36 @@ HTML = """<!DOCTYPE html>
     padding: 12px;
     display: none;
   }
+
+  .api-key-row {
+    margin-bottom: 24px;
+  }
+
+  .api-key-row label {
+    font-size: 0.85rem;
+    color: #888;
+    display: block;
+    margin-bottom: 6px;
+  }
+
+  .api-key-input {
+    background: #111;
+    color: #e8e8e8;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    font-family: monospace;
+    width: 100%;
+  }
+
+  .api-key-input:focus { outline: 2px solid #555; border-color: #555; }
+
+  .api-key-hint {
+    font-size: 0.72rem;
+    color: #555;
+    margin-top: 5px;
+  }
 </style>
 </head>
 <body>
@@ -234,6 +264,19 @@ HTML = """<!DOCTYPE html>
 <p class="subtitle">Automatically remove bloopers from your podcast recording</p>
 
 <div class="card">
+
+  <div class="api-key-row">
+    <label for="apiKeyInput">Anthropic API key</label>
+    <input
+      class="api-key-input"
+      type="password"
+      id="apiKeyInput"
+      placeholder="sk-ant-..."
+      oninput="checkReady()"
+      autocomplete="off"
+    />
+    <div class="api-key-hint">Your key is sent only to this local server and never stored.</div>
+  </div>
 
   <div class="upload-grid">
     <!-- Audio upload -->
@@ -324,13 +367,15 @@ function setFile(type, file) {
 function checkReady() {
   const hasAudio = document.getElementById('audioInput').files.length > 0;
   const hasScript = document.getElementById('scriptInput').files.length > 0;
-  document.getElementById('processBtn').disabled = !(hasAudio && hasScript);
+  const hasKey = document.getElementById('apiKeyInput').value.trim().length > 0;
+  document.getElementById('processBtn').disabled = !(hasAudio && hasScript && hasKey);
 }
 
 async function startProcessing() {
   const audioFile = document.getElementById('audioInput').files[0];
   const scriptFile = document.getElementById('scriptInput').files[0];
   const model = document.getElementById('modelSelect').value;
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
 
   // Reset UI
   document.getElementById('processBtn').disabled = true;
@@ -343,6 +388,7 @@ async function startProcessing() {
   form.append('audio', audioFile);
   form.append('script', scriptFile);
   form.append('model', model);
+  form.append('api_key', apiKey);
 
   try {
     const res = await fetch('/process', { method: 'POST', body: form });
@@ -398,8 +444,9 @@ function downloadResult() {
 # ---------------------------------------------------------------------------
 
 def run_pipeline(job_id: str, audio_path: str, script_path: str,
-                 output_path: str, model_size: str) -> None:
+                 output_path: str, model_size: str, api_key: str) -> None:
     try:
+        os.environ["ANTHROPIC_API_KEY"] = api_key
         sys.path.insert(0, os.path.dirname(__file__))
 
         _update(job_id, 10, "Transcribing audio with Whisper… (may take a few minutes)")
@@ -456,6 +503,9 @@ def process():
         return jsonify(error="Both audio and script files are required."), 400
 
     model_size = request.form.get("model", "base")
+    api_key = request.form.get("api_key", "").strip() or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify(error="An Anthropic API key is required."), 400
 
     job_dir = tempfile.mkdtemp(prefix="podcut_")
     audio_path = os.path.join(job_dir, audio.filename)
@@ -478,7 +528,7 @@ def process():
 
     t = threading.Thread(
         target=run_pipeline,
-        args=(job_id, audio_path, script_path, output_path, model_size),
+        args=(job_id, audio_path, script_path, output_path, model_size, api_key),
         daemon=True,
     )
     t.start()
@@ -516,10 +566,5 @@ def download(job_id):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit(
-            "Error: ANTHROPIC_API_KEY is not set.\n"
-            "Export your key first:  export ANTHROPIC_API_KEY=sk-ant-..."
-        )
     print("podcut UI running at http://localhost:7860")
     app.run(host="0.0.0.0", port=7860, debug=False)
