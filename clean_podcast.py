@@ -143,10 +143,9 @@ def parse_script(docx_path: str) -> str:
     """
     Extract plain narration text from a .docx file.
 
-    All character formatting (bold, italic, font size) is ignored — only the
-    raw text matters.  Paragraphs whose every run is highlighted with a marker
-    colour are treated as stage directions / production notes and skipped so
-    they don't pollute the text the audio is compared against.
+    Only plain (non-highlighted, non-bold) runs are included.  Highlighted
+    and bold text are treated as stage directions / speaker notes and skipped
+    so they don't pollute the narration text the audio is compared against.
 
     Args:
         docx_path: Path to the Word document.
@@ -172,7 +171,8 @@ def parse_script(docx_path: str) -> str:
         for run in para.runs:
             color = run.font.highlight_color
             is_highlighted = (color is not None and color != WD_COLOR_INDEX.AUTO)
-            if not is_highlighted:
+            is_bold = bool(run.bold)
+            if not is_highlighted and not is_bold:
                 parts.append(run.text)
 
         text = "".join(parts).strip()
