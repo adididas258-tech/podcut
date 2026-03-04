@@ -21,7 +21,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request, send_file
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB upload limit
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB upload limit
 
 # In-memory job store  {job_id: {...}}
 jobs: dict = {}
