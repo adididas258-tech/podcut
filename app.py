@@ -2,13 +2,15 @@
 """
 podcut web UI — upload audio + script, download cleaned podcast.
 
+Uses the local fuzzy-matching pipeline from clean_podcast.py.
+No API key required.
+
 Run:
     pip install flask
     python app.py
 Then open http://localhost:7860
 """
 
-import json
 import os
 import sys
 import tempfile
@@ -137,20 +139,24 @@ HTML = """<!DOCTYPE html>
     word-break: break-all;
   }
 
-  .options-row {
-    display: flex;
-    align-items: center;
+  .options-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 12px;
     margin-bottom: 24px;
   }
 
-  .options-row label {
-    font-size: 0.85rem;
-    color: #888;
-    white-space: nowrap;
+  .option-block label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #666;
+    display: block;
+    margin-bottom: 6px;
   }
 
-  select {
+  select, .threshold-input {
     background: #111;
     color: #e8e8e8;
     border: 1px solid #333;
@@ -158,10 +164,18 @@ HTML = """<!DOCTYPE html>
     padding: 8px 12px;
     font-size: 0.85rem;
     cursor: pointer;
-    flex: 1;
+    width: 100%;
   }
 
-  select:focus { outline: 2px solid #555; }
+  select:focus, .threshold-input:focus { outline: 2px solid #555; }
+
+  .threshold-input { cursor: text; }
+
+  .threshold-hint {
+    font-size: 0.72rem;
+    color: #555;
+    margin-top: 4px;
+  }
 
   .btn {
     width: 100%;
@@ -227,35 +241,19 @@ HTML = """<!DOCTYPE html>
     display: none;
   }
 
-  .api-key-row {
-    margin-bottom: 24px;
-  }
-
-  .api-key-row label {
-    font-size: 0.85rem;
-    color: #888;
-    display: block;
-    margin-bottom: 6px;
-  }
-
-  .api-key-input {
+  .result-summary {
+    margin-top: 16px;
     background: #111;
-    color: #e8e8e8;
-    border: 1px solid #333;
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-size: 0.85rem;
-    font-family: monospace;
-    width: 100%;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 0.82rem;
+    color: #888;
+    display: none;
+    line-height: 1.7;
   }
 
-  .api-key-input:focus { outline: 2px solid #555; border-color: #555; }
-
-  .api-key-hint {
-    font-size: 0.72rem;
-    color: #555;
-    margin-top: 5px;
-  }
+  .result-summary strong { color: #7ec88a; }
 </style>
 </head>
 <body>
@@ -264,19 +262,6 @@ HTML = """<!DOCTYPE html>
 <p class="subtitle">Automatically remove bloopers from your podcast recording</p>
 
 <div class="card">
-
-  <div class="api-key-row">
-    <label for="apiKeyInput">Anthropic API key</label>
-    <input
-      class="api-key-input"
-      type="password"
-      id="apiKeyInput"
-      placeholder="sk-ant-..."
-      oninput="checkReady()"
-      autocomplete="off"
-    />
-    <div class="api-key-hint">Your key is sent only to this local server and never stored.</div>
-  </div>
 
   <div class="upload-grid">
     <!-- Audio upload -->
@@ -298,19 +283,31 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="options-row">
-    <label for="modelSelect">Whisper model</label>
-    <select id="modelSelect">
-      <option value="tiny">tiny — fastest, least accurate</option>
-      <option value="base" selected>base — good balance (default)</option>
-      <option value="small">small — better accuracy</option>
-      <option value="medium">medium — high accuracy, slower</option>
-      <option value="large">large — best accuracy, slowest</option>
-    </select>
+  <div class="options-grid">
+    <div class="option-block">
+      <label for="modelSelect">Whisper model</label>
+      <select id="modelSelect">
+        <option value="tiny">tiny — fastest</option>
+        <option value="base" selected>base — balanced</option>
+        <option value="small">small — better</option>
+        <option value="medium">medium — high accuracy</option>
+        <option value="large">large — best, slowest</option>
+      </select>
+    </div>
+    <div class="option-block">
+      <label for="thresholdInput">Match threshold</label>
+      <input
+        class="threshold-input"
+        type="number"
+        id="thresholdInput"
+        min="30" max="100" value="70"
+      />
+      <div class="threshold-hint">0–100. Lower = more lenient.</div>
+    </div>
   </div>
 
   <button class="btn btn-primary" id="processBtn" disabled onclick="startProcessing()">
-    Process podcast
+    Clean podcast
   </button>
 
   <div class="progress-area" id="progressArea">
@@ -322,8 +319,10 @@ HTML = """<!DOCTYPE html>
 
   <div class="status-error" id="errorBox"></div>
 
+  <div class="result-summary" id="resultSummary"></div>
+
   <button class="btn btn-download" id="downloadBtn" onclick="downloadResult()">
-    ⬇ Download cleaned audio
+    Download cleaned audio
   </button>
 
 </div>
@@ -357,29 +356,27 @@ document.getElementById('scriptInput').addEventListener('change', e => setFile('
 
 function setFile(type, file) {
   if (!file) return;
-  const zone = document.getElementById(type + 'Zone');
-  const nameEl = document.getElementById(type + 'Name');
-  zone.classList.add('has-file');
-  nameEl.textContent = file.name;
+  document.getElementById(type + 'Zone').classList.add('has-file');
+  document.getElementById(type + 'Name').textContent = file.name;
   checkReady();
 }
 
 function checkReady() {
-  const hasAudio = document.getElementById('audioInput').files.length > 0;
+  const hasAudio  = document.getElementById('audioInput').files.length > 0;
   const hasScript = document.getElementById('scriptInput').files.length > 0;
-  const hasKey = document.getElementById('apiKeyInput').value.trim().length > 0;
-  document.getElementById('processBtn').disabled = !(hasAudio && hasScript && hasKey);
+  document.getElementById('processBtn').disabled = !(hasAudio && hasScript);
 }
 
 async function startProcessing() {
-  const audioFile = document.getElementById('audioInput').files[0];
+  const audioFile  = document.getElementById('audioInput').files[0];
   const scriptFile = document.getElementById('scriptInput').files[0];
-  const model = document.getElementById('modelSelect').value;
-  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  const model      = document.getElementById('modelSelect').value;
+  const threshold  = parseInt(document.getElementById('thresholdInput').value, 10) || 70;
 
   // Reset UI
   document.getElementById('processBtn').disabled = true;
   document.getElementById('downloadBtn').style.display = 'none';
+  document.getElementById('resultSummary').style.display = 'none';
   document.getElementById('errorBox').style.display = 'none';
   document.getElementById('progressArea').style.display = 'block';
   setProgress(0, 'Uploading files…');
@@ -388,7 +385,7 @@ async function startProcessing() {
   form.append('audio', audioFile);
   form.append('script', scriptFile);
   form.append('model', model);
-  form.append('api_key', apiKey);
+  form.append('threshold', threshold);
 
   try {
     const res = await fetch('/process', { method: 'POST', body: form });
@@ -399,19 +396,31 @@ async function startProcessing() {
     pollInterval = setInterval(pollStatus, 2000);
   } catch (err) {
     showError(err.message);
+    document.getElementById('processBtn').disabled = false;
   }
 }
 
 async function pollStatus() {
   if (!currentJobId) return;
   try {
-    const res = await fetch('/status/' + currentJobId);
+    const res  = await fetch('/status/' + currentJobId);
     const data = await res.json();
     setProgress(data.progress, data.step);
+
     if (data.status === 'done') {
       clearInterval(pollInterval);
       document.getElementById('downloadBtn').style.display = 'block';
       document.getElementById('processBtn').disabled = false;
+      if (data.summary) {
+        const s = data.summary;
+        const el = document.getElementById('resultSummary');
+        el.innerHTML =
+          `<strong>${s.segments_kept}</strong> segment(s) kept &nbsp;·&nbsp; ` +
+          `<strong>${s.segments_removed}</strong> blooper(s) removed &nbsp;·&nbsp; ` +
+          `<strong>${s.total_kept_s}s</strong> of clean audio &nbsp;·&nbsp; ` +
+          `<strong>${s.total_removed_s}s</strong> cut`;
+        el.style.display = 'block';
+      }
     } else if (data.status === 'error') {
       clearInterval(pollInterval);
       showError(data.error || 'An error occurred.');
@@ -429,6 +438,7 @@ function showError(msg) {
   const box = document.getElementById('errorBox');
   box.textContent = 'Error: ' + msg;
   box.style.display = 'block';
+  document.getElementById('progressArea').style.display = 'none';
 }
 
 function downloadResult() {
@@ -440,42 +450,42 @@ function downloadResult() {
 """
 
 # ---------------------------------------------------------------------------
-# Background processing pipeline
+# Background processing pipeline (uses clean_podcast.py functions directly)
 # ---------------------------------------------------------------------------
 
 def run_pipeline(job_id: str, audio_path: str, script_path: str,
-                 output_path: str, model_size: str, api_key: str) -> None:
+                 output_path: str, model_size: str, threshold: int) -> None:
+    """Run the full clean_podcast pipeline in a background thread."""
     try:
-        os.environ["ANTHROPIC_API_KEY"] = api_key
-        sys.path.insert(0, os.path.dirname(__file__))
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+        # Import the three core functions from our standalone script.
+        from clean_podcast import transcribe_audio, parse_script, align_and_detect_bloopers, edit_audio
 
         _update(job_id, 10, "Transcribing audio with Whisper… (may take a few minutes)")
-        from transcribe import transcribe_audio
-        segments = transcribe_audio(audio_path, model_size=model_size)
-        if not segments:
+        words = transcribe_audio(audio_path, model_size=model_size)
+        if not words:
             raise ValueError("Whisper produced an empty transcript — is the audio file valid?")
 
         _update(job_id, 45, "Parsing script…")
-        from parse_script import parse_word_doc
-        script_text = parse_word_doc(script_path)
+        script_text = parse_script(script_path)
 
-        _update(job_id, 60, "Analysing with Claude AI… (may take a moment)")
-        from align import detect_bloopers
-        analysis = detect_bloopers(segments, script_text)
-
-        if not analysis.segments_to_keep:
-            raise ValueError("Claude returned no segments to keep — check your input files.")
+        _update(job_id, 55, "Aligning transcript to script (fuzzy matching)…")
+        segments = align_and_detect_bloopers(words, script_text, match_threshold=threshold)
 
         _update(job_id, 85, "Editing audio…")
-        from edit_audio import edit_audio
-        edit_audio(
-            input_path=audio_path,
-            segments_to_keep=analysis.segments_to_keep,
-            output_path=output_path,
-            crossfade_ms=20,
-        )
+        edit_audio(audio_path, segments, output_path, crossfade_ms=20)
 
-        jobs[job_id].update(status="done", progress=100, step="Done!")
+        # Build a summary for the UI.
+        kept    = [s for s in segments if s.label == "keep"]
+        blooper = [s for s in segments if s.label == "blooper"]
+        summary = {
+            "segments_kept":    len(kept),
+            "segments_removed": len(blooper),
+            "total_kept_s":     round(sum(s.end - s.start for s in kept),    1),
+            "total_removed_s":  round(sum(s.end - s.start for s in blooper), 1),
+        }
+        jobs[job_id].update(status="done", progress=100, step="Done!", summary=summary)
 
     except Exception as exc:
         jobs[job_id].update(status="error", error=str(exc))
@@ -497,19 +507,18 @@ def index():
 
 @app.route("/process", methods=["POST"])
 def process():
-    audio = request.files.get("audio")
+    audio  = request.files.get("audio")
     script = request.files.get("script")
     if not audio or not script:
         return jsonify(error="Both audio and script files are required."), 400
 
     model_size = request.form.get("model", "base")
-    api_key = request.form.get("api_key", "").strip() or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return jsonify(error="An Anthropic API key is required."), 400
+    threshold  = int(request.form.get("threshold", 70))
 
-    job_dir = tempfile.mkdtemp(prefix="podcut_")
-    ext = Path(audio.filename).suffix or ".mp3"
-    audio_path = os.path.join(job_dir, "audio" + ext)
+    # Save uploads to a temp directory with safe ASCII filenames.
+    job_dir     = tempfile.mkdtemp(prefix="podcut_")
+    ext         = Path(audio.filename).suffix or ".mp3"
+    audio_path  = os.path.join(job_dir, "audio" + ext)
     script_path = os.path.join(job_dir, "script.docx")
     audio.save(audio_path)
     script.save(script_path)
@@ -518,17 +527,18 @@ def process():
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
-        "status": "processing",
-        "step": "Starting…",
-        "progress": 0,
-        "error": None,
-        "output": output_path,
+        "status":      "processing",
+        "step":        "Starting…",
+        "progress":    0,
+        "error":       None,
+        "summary":     None,
+        "output":      output_path,
         "output_name": "cleaned" + ext,
     }
 
     t = threading.Thread(
         target=run_pipeline,
-        args=(job_id, audio_path, script_path, output_path, model_size, api_key),
+        args=(job_id, audio_path, script_path, output_path, model_size, threshold),
         daemon=True,
     )
     t.start()
@@ -546,6 +556,7 @@ def status(job_id):
         step=job["step"],
         progress=job["progress"],
         error=job.get("error"),
+        summary=job.get("summary"),
     )
 
 
