@@ -507,13 +507,23 @@ def index():
 
 @app.route("/process", methods=["POST"])
 def process():
+    try:
+        return _process_inner()
+    except Exception as exc:
+        return jsonify(error=str(exc)), 500
+
+
+def _process_inner():
     audio  = request.files.get("audio")
     script = request.files.get("script")
     if not audio or not script:
         return jsonify(error="Both audio and script files are required."), 400
 
     model_size = request.form.get("model", "base")
-    threshold  = int(request.form.get("threshold", 70))
+    try:
+        threshold = int(request.form.get("threshold") or 70)
+    except (ValueError, TypeError):
+        threshold = 70
 
     # Save uploads to a temp directory with safe ASCII filenames.
     job_dir     = tempfile.mkdtemp(prefix="podcut_")
