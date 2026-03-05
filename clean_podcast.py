@@ -132,7 +132,7 @@ def _normalize(word: str) -> str:
     Strip punctuation and lowercase a word for fuzzy comparison.
     Keeps letters, digits, and apostrophes (contractions like "don't").
     """
-    return re.sub(r"[^a-z0-9']", "", word.lower())
+    return re.sub(r"[^\w']", "", word.lower()).replace("_", "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
