@@ -60,18 +60,23 @@ class Segment:
 # Step 1 — Transcribe audio with Whisper (word-level timestamps)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def transcribe_audio(audio_path: str, model_size: str = "base") -> list[Word]:
+def transcribe_audio(audio_path: str, model_size: str = "base",
+                     language: str | None = None) -> list[Word]:
     """
     Run Whisper on the audio file and return every word with its timestamp.
 
-    We request word_timestamps=True so each word gets its own start/end time.
-    If the chosen model doesn't return word-level data (rare), we fall back to
-    distributing each segment's time span evenly across its words.
+    Uses segment-level timestamps (word_timestamps=False) and distributes
+    each segment's time span evenly across its words.  This is significantly
+    faster than DTW word-alignment (word_timestamps=True), which can take
+    hours on CPU for non-English languages like Hebrew due to tokenizer
+    overhead — while the timing accuracy is sufficient for podcast editing.
 
     Args:
         audio_path:  Path to the raw audio file (.mp3, .wav, .m4a, …).
         model_size:  Whisper model to load. Larger = slower but more accurate.
                      "base" is a good default for clear podcast speech.
+        language:    BCP-47 language code (e.g. "he", "en").  When provided,
+                     Whisper skips its ~30 s language-detection step.
 
     Returns:
         List of Word objects ordered by time.
@@ -87,8 +92,14 @@ def transcribe_audio(audio_path: str, model_size: str = "base") -> list[Word]:
     print(f"  Loading Whisper '{model_size}' model…")
     model = whisper.load_model(model_size)
 
-    print(f"  Transcribing '{audio_path}'…")
-    result = model.transcribe(audio_path, word_timestamps=True, verbose=False)
+    transcribe_kwargs: dict = {"word_timestamps": False, "verbose": False,
+                               "fp16": False}
+    if language:
+        transcribe_kwargs["language"] = language
+        print(f"  Transcribing '{audio_path}' (language: {language})…")
+    else:
+        print(f"  Transcribing '{audio_path}'…")
+    result = model.transcribe(audio_path, **transcribe_kwargs)
 
     words: list[Word] = []
 

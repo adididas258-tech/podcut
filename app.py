@@ -453,6 +453,22 @@ function downloadResult() {
 # Background processing pipeline (uses clean_podcast.py functions directly)
 # ---------------------------------------------------------------------------
 
+def _detect_script_language(script_text: str) -> str | None:
+    """Return a Whisper language code if we can identify it from the script."""
+    import re
+    if re.search(r'[\u05d0-\u05ea]', script_text):
+        return "he"
+    if re.search(r'[\u0600-\u06ff]', script_text):
+        return "ar"
+    if re.search(r'[\u4e00-\u9fff]', script_text):
+        return "zh"
+    if re.search(r'[\u3040-\u309f\u30a0-\u30ff]', script_text):
+        return "ja"
+    if re.search(r'[\u0400-\u04ff]', script_text):
+        return "ru"
+    return None
+
+
 def run_pipeline(job_id: str, audio_path: str, script_path: str,
                  output_path: str, model_size: str, threshold: int) -> None:
     """Run the full clean_podcast pipeline in a background thread."""
@@ -463,12 +479,18 @@ def run_pipeline(job_id: str, audio_path: str, script_path: str,
         from clean_podcast import transcribe_audio, parse_script, align_and_detect_bloopers, edit_audio
 
         _update(job_id, 10, "Transcribing audio with Whisper… (may take a few minutes)")
-        words = transcribe_audio(audio_path, model_size=model_size)
+        # Peek at the script to detect language and skip Whisper's detection step.
+        _update(job_id, 12, "Parsing script to detect language…")
+        script_text_preview = parse_script(script_path)
+        language = _detect_script_language(script_text_preview)
+        lang_label = f" (detected: {language})" if language else ""
+        _update(job_id, 14, f"Transcribing audio with Whisper{lang_label}…")
+        words = transcribe_audio(audio_path, model_size=model_size, language=language)
         if not words:
             raise ValueError("Whisper produced an empty transcript — is the audio file valid?")
 
         _update(job_id, 45, "Parsing script…")
-        script_text = parse_script(script_path)
+        script_text = script_text_preview  # already parsed above
 
         _update(job_id, 55, "Aligning transcript to script (fuzzy matching)…")
         def _align_progress(pct, step):
