@@ -242,20 +242,40 @@ def align_and_detect_bloopers(
     script_sentences = _split_sentences(script_text)
     print(f"  Script split into {len(script_sentences)} alignment sentence(s).")
 
-    # --- Phase A: find all candidate windows for each sentence ------------- #
-    print("  Scanning transcript for sentence matches…")
-    all_candidates: list[list[tuple[int, int, float]]] = []
-    for sentence in script_sentences:
+    # Single-pass alignment: for each sentence scan forward from where the
+    # previous match ended, so we never re-scan positions we've already passed.
+    # This turns the O(sentences × transcript) scan into roughly O(transcript).
+    print("  Aligning transcript to script (sentence by sentence)…")
+    T = len(norm_transcript)
+    S = len(script_sentences)
+    chosen_matches: list[tuple[int, int] | None] = []
+    min_start = 0
+
+    for idx, sentence in enumerate(script_sentences):
         sent_words = [_normalize(w) for w in sentence.split() if _normalize(w)]
         if len(sent_words) < 2:
-            all_candidates.append([])  # too short to be a reliable anchor
+            chosen_matches.append(None)
             continue
-        candidates = _find_all_windows(sent_words, norm_transcript, match_threshold)
-        all_candidates.append(candidates)
 
-    # --- Phase B: greedy monotone path (last clean take wins) -------------- #
-    print("  Selecting best takes (restarts handled — last clean take wins)…")
-    chosen_matches = _pick_best_path(all_candidates)
+        # Search a bounded window ahead to stay fast; fall back to full remainder.
+        lookahead = max(len(sent_words) * 15, (T - min_start) // max(S - idx, 1) * 4 + 200)
+        end_at = min(T, min_start + lookahead)
+        candidates = _find_all_windows(sent_words, norm_transcript, match_threshold,
+                                        start_from=min_start, end_at=end_at)
+        if not candidates:
+            # Wider fallback: scan the full remaining transcript.
+            candidates = _find_all_windows(sent_words, norm_transcript, match_threshold,
+                                            start_from=min_start, end_at=T)
+
+        if not candidates:
+            chosen_matches.append(None)
+            continue
+
+        max_score = max(sc for _, _, sc in candidates)
+        top = [(s, e, sc) for s, e, sc in candidates if sc >= max_score * 0.85]
+        best = max(top, key=lambda x: x[0])  # latest start = last clean take
+        chosen_matches.append((best[0], best[1]))
+        min_start = best[1]  # advance cursor past this match
 
     # --- Phase C: convert word-index ranges to time-based Segments --------- #
     segments = _build_segments(transcript_words, chosen_matches, script_sentences)
@@ -308,6 +328,8 @@ def _find_all_windows(
     sent_words: list[str],
     norm_transcript: list[str],
     threshold: int,
+    start_from: int = 0,
+    end_at: int | None = None,
 ) -> list[tuple[int, int, float]]:
     """
     Slide a window of len(sent_words) words across the transcript and return
@@ -316,17 +338,22 @@ def _find_all_windows(
     A small slack (±n/5 extra words) is tried at each position so that filler
     words like "um" or "uh" inserted between script words don't cause a miss.
 
+    start_from / end_at limit the search range so callers can avoid
+    re-scanning positions that have already been matched.
+
     Returns a list of (start_idx, end_idx, score) tuples, sorted by start_idx.
     """
     from rapidfuzz import fuzz
 
     n = len(sent_words)
+    if end_at is None:
+        end_at = len(norm_transcript)
     sent_str = " ".join(sent_words)
     # Maximum extra words to tolerate (fillers, hesitations).
     slack = max(2, n // 5)
     matches: list[tuple[int, int, float]] = []
 
-    for i in range(len(norm_transcript) - n + 1):
+    for i in range(start_from, min(end_at, len(norm_transcript) - n + 1)):
         best_score = 0.0
         best_end = i + n
 
