@@ -471,7 +471,10 @@ def run_pipeline(job_id: str, audio_path: str, script_path: str,
         script_text = parse_script(script_path)
 
         _update(job_id, 55, "Aligning transcript to script (fuzzy matching)…")
-        segments = align_and_detect_bloopers(words, script_text, match_threshold=threshold)
+        def _align_progress(pct, step):
+            _update(job_id, pct, step)
+        segments = align_and_detect_bloopers(words, script_text, match_threshold=threshold,
+                                             progress_callback=_align_progress)
 
         _update(job_id, 85, "Editing audio…")
         edit_audio(audio_path, segments, output_path, crossfade_ms=20)

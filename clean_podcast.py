@@ -199,6 +199,7 @@ def align_and_detect_bloopers(
     transcript_words: list[Word],
     script_text: str,
     match_threshold: int = 70,
+    progress_callback=None,
 ) -> list[Segment]:
     """
     Align the transcript to the script and label every time range as either
@@ -252,6 +253,10 @@ def align_and_detect_bloopers(
     min_start = 0
 
     for idx, sentence in enumerate(script_sentences):
+        if progress_callback and S > 0:
+            pct = 55 + int(30 * idx / S)  # 55 % → 85 % during alignment
+            progress_callback(pct, f"Aligning sentence {idx + 1}/{S}…")
+
         sent_words = [_normalize(w) for w in sentence.split() if _normalize(w)]
         if len(sent_words) < 2:
             chosen_matches.append(None)
