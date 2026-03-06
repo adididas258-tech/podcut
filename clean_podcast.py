@@ -178,18 +178,16 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
     # ── Groq API ─────────────────────────────────────────────────────────── #
     groq_key = os.environ.get("GROQ_API_KEY")
     if not groq_key:
-        sys.exit(
-            "Error: GROQ_API_KEY is not set.\n"
-            "Get a free key at https://console.groq.com\n"
-            "Then: export GROQ_API_KEY=gsk_..."
+        raise RuntimeError(
+            "GROQ_API_KEY is not set. "
+            "Get a free key at https://console.groq.com"
         )
 
     try:
         from groq import Groq
     except ImportError:
-        sys.exit(
-            "Error: groq package is not installed.\n"
-            "Fix: pip install groq"
+        raise RuntimeError(
+            "groq package is not installed. Run: python -m pip install groq"
         )
 
     client = Groq(api_key=groq_key)

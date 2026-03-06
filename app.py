@@ -523,7 +523,7 @@ def run_pipeline(job_id: str, audio_path: str, script_path: str,
         }
         jobs[job_id].update(status="done", progress=100, step="Done!", summary=summary)
 
-    except Exception as exc:
+    except BaseException as exc:
         jobs[job_id].update(status="error", error=str(exc))
 
 
