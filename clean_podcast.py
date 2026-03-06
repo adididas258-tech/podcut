@@ -69,34 +69,42 @@ CHUNK_SEC = 600  # 10-minute chunks for parallel transcription
 
 
 def _audio_duration(audio_path: str) -> float:
-    """Return duration in seconds via ffprobe."""
-    r = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-        capture_output=True, text=True,
-    )
-    return float(r.stdout.strip())
+    """Return duration in seconds via ffprobe, or estimate from file size."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+            capture_output=True, text=True, check=True,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        # ffprobe unavailable — estimate assuming 128 kbps audio.
+        # This over-estimates WAV/high-bitrate files but that's fine:
+        # we'd rather chunk unnecessarily than send a giant file.
+        return os.path.getsize(audio_path) * 8 / 128_000
 
 
 def _transcribe_chunk(client, audio_path: str, start: float, duration: float,
                       language: str | None, idx: int) -> list[Word]:
     """
-    Extract a time slice from audio_path, compress to Opus, send to Groq.
+    Extract a time slice from audio_path as 16 kHz mono WAV, send to Groq.
+    WAV requires no external codec — always works on every platform.
+    A 10-minute slice is ~19 MB, safely under Groq's 25 MB limit.
     Returns Word objects with timestamps offset to the original file's timeline.
     """
-    tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
     try:
         subprocess.run(
             ["ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
              "-i", audio_path,
-             "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "16k",
+             "-ar", "16000", "-ac", "1",  # resample; default encoder = PCM WAV
              tmp.name],
             check=True, capture_output=True,
         )
         with open(tmp.name, "rb") as f:
             tr = client.audio.transcriptions.create(
-                file=(f"chunk{idx}.ogg", f),
+                file=(f"chunk{idx}.wav", f),
                 model="whisper-large-v3-turbo",
                 response_format="verbose_json",
                 timestamp_granularities=["segment"],
@@ -220,15 +228,15 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
 
         words: list[Word] = [w for chunk in all_chunks for w in (chunk or [])]
     else:
-        # Short file — single request (compress first if needed).
+        # Short file — single request (resample to 16 kHz mono WAV if needed).
         file_mb = os.path.getsize(audio_path) / (1024 * 1024)
         if file_mb > 24:
-            print(f"  Compressing {file_mb:.0f} MB audio…")
-            tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+            print(f"  Resampling {file_mb:.0f} MB audio to 16 kHz mono WAV…")
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             tmp.close()
             subprocess.run(
                 ["ffmpeg", "-y", "-i", audio_path,
-                 "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "16k",
+                 "-ar", "16000", "-ac", "1",  # PCM WAV, no external codec
                  tmp.name],
                 check=True, capture_output=True,
             )
