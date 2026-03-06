@@ -22,7 +22,7 @@ Usage:
     python clean_podcast.py --audio raw.mp3 --script ep1.docx --output out.mp3 --no-crossfade
 
 Requirements:
-    pip install openai-whisper python-docx pydub rapidfuzz
+    pip install faster-whisper python-docx pydub rapidfuzz
     ffmpeg must be installed (apt install ffmpeg  /  brew install ffmpeg)
 """
 
@@ -69,11 +69,10 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
     so that repeat runs with the same audio file and model skip the expensive
     transcription step entirely.
 
-    Uses segment-level timestamps (word_timestamps=False) and distributes
-    each segment's time span evenly across its words.  This is significantly
-    faster than DTW word-alignment (word_timestamps=True), which can take
-    hours on CPU for non-English languages like Hebrew due to tokenizer
-    overhead — while the timing accuracy is sufficient for podcast editing.
+    Uses faster-whisper (CTranslate2, INT8 quantization) which is ~4× faster
+    than openai-whisper on CPU with the same accuracy.  Segment-level timestamps
+    are used (word_timestamps=False); each segment's time span is distributed
+    evenly across its words — sufficient accuracy for podcast editing.
 
     Args:
         audio_path:  Path to the raw audio file (.mp3, .wav, .m4a, …).
@@ -105,57 +104,45 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
             pass  # corrupt cache — fall through to re-transcribe
 
     try:
-        import whisper
+        from faster_whisper import WhisperModel
     except ImportError:
         sys.exit(
-            "Error: openai-whisper is not installed.\n"
-            "Fix: pip install openai-whisper"
+            "Error: faster-whisper is not installed.\n"
+            "Fix: pip install faster-whisper"
         )
 
-    print(f"  Loading Whisper '{model_size}' model…")
-    model = whisper.load_model(model_size)
-
-    transcribe_kwargs: dict = {"word_timestamps": False, "verbose": False,
-                               "fp16": False}
     if language:
-        transcribe_kwargs["language"] = language
         print(f"  Transcribing '{audio_path}' (language: {language})…")
     else:
         print(f"  Transcribing '{audio_path}'…")
-    result = model.transcribe(audio_path, **transcribe_kwargs)
+
+    # INT8 quantization on CPU — same accuracy as openai-whisper, ~4× faster.
+    print(f"  Loading faster-whisper '{model_size}' model (int8)…")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+
+    segments_iter, _info = model.transcribe(
+        audio_path,
+        language=language,
+        beam_size=5,
+        word_timestamps=False,
+    )
 
     words: list[Word] = []
 
-    for seg in result["segments"]:
-        seg_words = seg.get("words", [])
-
-        if seg_words:
-            # Happy path: Whisper returned per-word timing.
-            for w in seg_words:
-                raw = w["word"].strip()
-                if not raw:
-                    continue
-                words.append(Word(
-                    text=raw,
-                    norm=_normalize(raw),
-                    start=float(w["start"]),
-                    end=float(w["end"]),
-                ))
-        else:
-            # Fallback: distribute the segment's time evenly across its words.
-            raw_words = seg["text"].strip().split()
-            if not raw_words:
-                continue
-            seg_start = float(seg["start"])
-            seg_end = float(seg["end"])
-            step = (seg_end - seg_start) / len(raw_words)
-            for i, raw in enumerate(raw_words):
-                words.append(Word(
-                    text=raw,
-                    norm=_normalize(raw),
-                    start=seg_start + i * step,
-                    end=seg_start + (i + 1) * step,
-                ))
+    for seg in segments_iter:
+        # faster-whisper segments have .words only when word_timestamps=True.
+        # Distribute segment time evenly across its words (same as before).
+        raw_words = seg.text.strip().split()
+        if not raw_words:
+            continue
+        step = (seg.end - seg.start) / len(raw_words)
+        for i, raw in enumerate(raw_words):
+            words.append(Word(
+                text=raw,
+                norm=_normalize(raw),
+                start=seg.start + i * step,
+                end=seg.start + (i + 1) * step,
+            ))
 
     print(f"  Transcription complete: {len(words)} words.")
 
