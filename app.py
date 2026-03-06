@@ -488,26 +488,15 @@ def run_pipeline(job_id: str, audio_path: str, script_path: str,
         _update(job_id, 10, "Parsing script…")
         script_text_preview = parse_script(script_path)
         language = _detect_script_language(script_text_preview)
-        lang_label = f" (detected: {language})" if language else ""
 
-        # Show file size so the user knows what to expect.
-        file_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        from clean_podcast import _compress_for_groq
-        if file_mb > 24:
-            _update(job_id, 14, f"Compressing {file_mb:.0f} MB audio for upload… (this takes ~30 s)")
-            upload_path, is_temp = _compress_for_groq(audio_path)
-        else:
-            upload_path, is_temp = audio_path, False
+        _update(job_id, 14, "Transcribing audio (splitting into chunks)…")
 
-        upload_mb = os.path.getsize(upload_path) / (1024 * 1024)
-        _update(job_id, 25, f"Uploading {upload_mb:.1f} MB to Groq for transcription{lang_label}…")
-        words = transcribe_audio(upload_path, model_size=model_size, language=language,
-                                 _already_compressed=True)
-        if is_temp:
-            try:
-                os.unlink(upload_path)
-            except Exception:
-                pass
+        def _transcription_progress(done: int, total: int) -> None:
+            pct = 14 + int(done / total * 31)  # 14 % → 45 %
+            _update(job_id, pct, f"Transcribing: chunk {done}/{total} done…")
+
+        words = transcribe_audio(audio_path, model_size=model_size, language=language,
+                                 progress_callback=_transcription_progress)
         if not words:
             raise ValueError("Groq returned an empty transcript — is the audio file valid?")
 

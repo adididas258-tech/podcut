@@ -29,9 +29,13 @@ Requirements:
 
 import argparse
 import json
+import math
 import os
 import re
+import subprocess
 import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 
@@ -61,36 +65,68 @@ class Segment:
 # Step 1 — Transcribe audio with Whisper (word-level timestamps)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compress_for_groq(audio_path: str) -> tuple[str, bool]:
+CHUNK_SEC = 600  # 10-minute chunks for parallel transcription
+
+
+def _audio_duration(audio_path: str) -> float:
+    """Return duration in seconds via ffprobe."""
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+        capture_output=True, text=True,
+    )
+    return float(r.stdout.strip())
+
+
+def _transcribe_chunk(client, audio_path: str, start: float, duration: float,
+                      language: str | None, idx: int) -> list[Word]:
     """
-    Return a path to an audio file that is guaranteed to be under 25 MB
-    (Groq's upload limit).  If the original is already small enough, return
-    it unchanged.  Otherwise re-encode to 16 kHz mono MP3 @ 32 kbps via
-    ffmpeg, which keeps a 60-minute file well under 15 MB.
-
-    Returns (path, is_temp).  The caller must delete the temp file when done.
+    Extract a time slice from audio_path, compress to Opus, send to Groq.
+    Returns Word objects with timestamps offset to the original file's timeline.
     """
-    import subprocess
-    import tempfile
-
-    limit = 24 * 1024 * 1024  # 24 MB — leave 1 MB headroom
-    if os.path.getsize(audio_path) <= limit:
-        return audio_path, False
-
-    print("  Audio > 24 MB — compressing to 16 kHz mono Opus for upload…")
     tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
     tmp.close()
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", audio_path,
-         "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "16k", tmp.name],
-        check=True, capture_output=True,
-    )
-    return tmp.name, True
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
+             "-i", audio_path,
+             "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "16k",
+             tmp.name],
+            check=True, capture_output=True,
+        )
+        with open(tmp.name, "rb") as f:
+            tr = client.audio.transcriptions.create(
+                file=(f"chunk{idx}.ogg", f),
+                model="whisper-large-v3-turbo",
+                response_format="verbose_json",
+                timestamp_granularities=["segment"],
+                language=language,
+            )
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+    words: list[Word] = []
+    for seg in tr.segments:
+        raw_words = seg.text.strip().split()
+        if not raw_words:
+            continue
+        step = (seg.end - seg.start) / len(raw_words)
+        for i, raw in enumerate(raw_words):
+            words.append(Word(
+                text=raw,
+                norm=_normalize(raw),
+                start=start + seg.start + i * step,
+                end=start + seg.start + (i + 1) * step,
+            ))
+    return words
 
 
 def transcribe_audio(audio_path: str, model_size: str = "base",
                      language: str | None = None,
-                     _already_compressed: bool = False) -> list[Word]:
+                     progress_callback=None) -> list[Word]:
     """
     Transcribe audio via the Groq Whisper API (whisper-large-v3-turbo).
 
@@ -148,43 +184,88 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
             "Fix: pip install groq"
         )
 
-    if _already_compressed:
-        upload_path, is_temp = audio_path, False
-    else:
-        upload_path, is_temp = _compress_for_groq(audio_path)
-    try:
-        lang_label = f" (language: {language})" if language else ""
-        print(f"  Sending to Groq whisper-large-v3-turbo{lang_label}…")
-        client = Groq(api_key=groq_key)
-        with open(upload_path, "rb") as f:
-            transcription = client.audio.transcriptions.create(
-                file=(os.path.basename(upload_path), f),
-                model="whisper-large-v3-turbo",
-                response_format="verbose_json",
-                timestamp_granularities=["segment"],
-                language=language,
-            )
-    finally:
-        if is_temp:
-            try:
-                os.unlink(upload_path)
-            except Exception:
-                pass
+    client = Groq(api_key=groq_key)
 
-    # ── Parse segments → Words ────────────────────────────────────────────── #
-    words: list[Word] = []
-    for seg in transcription.segments:
-        raw_words = seg.text.strip().split()
-        if not raw_words:
-            continue
-        step = (seg.end - seg.start) / len(raw_words)
-        for i, raw in enumerate(raw_words):
-            words.append(Word(
-                text=raw,
-                norm=_normalize(raw),
-                start=seg.start + i * step,
-                end=seg.start + (i + 1) * step,
-            ))
+    # ── Parallel chunked transcription ────────────────────────────────────── #
+    try:
+        total_dur = _audio_duration(audio_path)
+    except Exception:
+        total_dur = 0.0
+
+    lang_label = f" (language: {language})" if language else ""
+
+    if total_dur > CHUNK_SEC:
+        # Split into CHUNK_SEC chunks and transcribe concurrently (max 3 at once
+        # to respect Groq's rate limits on free tiers).
+        n = math.ceil(total_dur / CHUNK_SEC)
+        print(f"  Audio is {total_dur/60:.1f} min — splitting into {n} chunks"
+              f" for parallel transcription{lang_label}…")
+        all_chunks: list[list[Word] | None] = [None] * n
+        done_count = 0
+
+        def _do_chunk(i: int):
+            start = i * CHUNK_SEC
+            dur = min(CHUNK_SEC, total_dur - start)
+            return i, _transcribe_chunk(client, audio_path, start, dur, language, i)
+
+        with ThreadPoolExecutor(max_workers=min(n, 3)) as ex:
+            futures = {ex.submit(_do_chunk, i): i for i in range(n)}
+            for fut in as_completed(futures):
+                idx, chunk_words = fut.result()
+                all_chunks[idx] = chunk_words
+                done_count += 1
+                print(f"  Chunk {done_count}/{n} done ({len(chunk_words)} words).")
+                if progress_callback:
+                    progress_callback(done_count, n)
+
+        words: list[Word] = [w for chunk in all_chunks for w in (chunk or [])]
+    else:
+        # Short file — single request (compress first if needed).
+        file_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        if file_mb > 24:
+            print(f"  Compressing {file_mb:.0f} MB audio…")
+            tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+            tmp.close()
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", audio_path,
+                 "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "16k",
+                 tmp.name],
+                check=True, capture_output=True,
+            )
+            upload_path, is_temp = tmp.name, True
+        else:
+            upload_path, is_temp = audio_path, False
+        try:
+            print(f"  Sending to Groq whisper-large-v3-turbo{lang_label}…")
+            with open(upload_path, "rb") as f:
+                tr = client.audio.transcriptions.create(
+                    file=(os.path.basename(upload_path), f),
+                    model="whisper-large-v3-turbo",
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"],
+                    language=language,
+                )
+        finally:
+            if is_temp:
+                try:
+                    os.unlink(upload_path)
+                except Exception:
+                    pass
+        words = []
+        for seg in tr.segments:
+            raw_words = seg.text.strip().split()
+            if not raw_words:
+                continue
+            step = (seg.end - seg.start) / len(raw_words)
+            for i, raw in enumerate(raw_words):
+                words.append(Word(
+                    text=raw,
+                    norm=_normalize(raw),
+                    start=seg.start + i * step,
+                    end=seg.start + (i + 1) * step,
+                ))
+        if progress_callback:
+            progress_callback(1, 1)
 
     print(f"  Transcription complete: {len(words)} words.")
 
