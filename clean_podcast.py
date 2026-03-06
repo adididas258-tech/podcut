@@ -77,19 +77,20 @@ def _compress_for_groq(audio_path: str) -> tuple[str, bool]:
     if os.path.getsize(audio_path) <= limit:
         return audio_path, False
 
-    print("  Audio > 24 MB — compressing to 16 kHz mono MP3 for upload…")
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    print("  Audio > 24 MB — compressing to 16 kHz mono Opus for upload…")
+    tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
     tmp.close()
     subprocess.run(
         ["ffmpeg", "-y", "-i", audio_path,
-         "-ar", "16000", "-ac", "1", "-b:a", "32k", tmp.name],
+         "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "16k", tmp.name],
         check=True, capture_output=True,
     )
     return tmp.name, True
 
 
 def transcribe_audio(audio_path: str, model_size: str = "base",
-                     language: str | None = None) -> list[Word]:
+                     language: str | None = None,
+                     _already_compressed: bool = False) -> list[Word]:
     """
     Transcribe audio via the Groq Whisper API (whisper-large-v3-turbo).
 
@@ -147,7 +148,10 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
             "Fix: pip install groq"
         )
 
-    upload_path, is_temp = _compress_for_groq(audio_path)
+    if _already_compressed:
+        upload_path, is_temp = audio_path, False
+    else:
+        upload_path, is_temp = _compress_for_groq(audio_path)
     try:
         lang_label = f" (language: {language})" if language else ""
         print(f"  Sending to Groq whisper-large-v3-turbo{lang_label}…")
