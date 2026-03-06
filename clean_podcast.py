@@ -22,8 +22,9 @@ Usage:
     python clean_podcast.py --audio raw.mp3 --script ep1.docx --output out.mp3 --no-crossfade
 
 Requirements:
-    pip install faster-whisper python-docx pydub rapidfuzz
+    pip install groq python-docx pydub rapidfuzz
     ffmpeg must be installed (apt install ffmpeg  /  brew install ffmpeg)
+    GROQ_API_KEY must be set (free key at https://console.groq.com)
 """
 
 import argparse
@@ -60,26 +61,53 @@ class Segment:
 # Step 1 — Transcribe audio with Whisper (word-level timestamps)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _compress_for_groq(audio_path: str) -> tuple[str, bool]:
+    """
+    Return a path to an audio file that is guaranteed to be under 25 MB
+    (Groq's upload limit).  If the original is already small enough, return
+    it unchanged.  Otherwise re-encode to 16 kHz mono MP3 @ 32 kbps via
+    ffmpeg, which keeps a 60-minute file well under 15 MB.
+
+    Returns (path, is_temp).  The caller must delete the temp file when done.
+    """
+    import subprocess
+    import tempfile
+
+    limit = 24 * 1024 * 1024  # 24 MB — leave 1 MB headroom
+    if os.path.getsize(audio_path) <= limit:
+        return audio_path, False
+
+    print("  Audio > 24 MB — compressing to 16 kHz mono MP3 for upload…")
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.close()
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", audio_path,
+         "-ar", "16000", "-ac", "1", "-b:a", "32k", tmp.name],
+        check=True, capture_output=True,
+    )
+    return tmp.name, True
+
+
 def transcribe_audio(audio_path: str, model_size: str = "base",
                      language: str | None = None) -> list[Word]:
     """
-    Run Whisper on the audio file and return every word with its timestamp.
+    Transcribe audio via the Groq Whisper API (whisper-large-v3-turbo).
 
-    Results are cached to a JSON sidecar file (``<audio>.whisper_cache.json``)
-    so that repeat runs with the same audio file and model skip the expensive
-    transcription step entirely.
+    Groq runs at ~189× real-time, so a 30-minute podcast finishes in
+    roughly 10 seconds.  Requires the GROQ_API_KEY environment variable.
 
-    Uses faster-whisper (CTranslate2, INT8 quantization) which is ~4× faster
-    than openai-whisper on CPU with the same accuracy.  Segment-level timestamps
-    are used (word_timestamps=False); each segment's time span is distributed
-    evenly across its words — sufficient accuracy for podcast editing.
+    Large files (> 24 MB) are automatically compressed to a small MP3
+    before upload so they stay within Groq's 25 MB limit.
+
+    Results are cached to ``<audio>.whisper_cache.json`` so repeat runs
+    skip the API call entirely.
 
     Args:
         audio_path:  Path to the raw audio file (.mp3, .wav, .m4a, …).
-        model_size:  Whisper model to load. Larger = slower but more accurate.
-                     "base" is a good default for clear podcast speech.
+        model_size:  Ignored (kept for API compatibility — Groq always uses
+                     whisper-large-v3-turbo which is both fastest and best).
         language:    BCP-47 language code (e.g. "he", "en").  When provided,
-                     Whisper skips its ~30 s language-detection step.
+                     Groq skips language detection.
 
     Returns:
         List of Word objects ordered by time.
@@ -95,43 +123,53 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
         try:
             with open(cache_path, encoding="utf-8") as f:
                 cached = json.load(f)
-            if (cached.get("model_size") == model_size
-                    and abs(cached.get("audio_mtime", 0) - audio_mtime) < 1):
+            if abs(cached.get("audio_mtime", 0) - audio_mtime) < 1:
                 words = [Word(**w) for w in cached["words"]]
                 print(f"  Transcript loaded from cache ({len(words)} words).")
                 return words
         except Exception:
             pass  # corrupt cache — fall through to re-transcribe
 
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
+    # ── Groq API ─────────────────────────────────────────────────────────── #
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key:
         sys.exit(
-            "Error: faster-whisper is not installed.\n"
-            "Fix: pip install faster-whisper"
+            "Error: GROQ_API_KEY is not set.\n"
+            "Get a free key at https://console.groq.com\n"
+            "Then: export GROQ_API_KEY=gsk_..."
         )
 
-    if language:
-        print(f"  Transcribing '{audio_path}' (language: {language})…")
-    else:
-        print(f"  Transcribing '{audio_path}'…")
+    try:
+        from groq import Groq
+    except ImportError:
+        sys.exit(
+            "Error: groq package is not installed.\n"
+            "Fix: pip install groq"
+        )
 
-    # INT8 quantization on CPU — same accuracy as openai-whisper, ~4× faster.
-    print(f"  Loading faster-whisper '{model_size}' model (int8)…")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    upload_path, is_temp = _compress_for_groq(audio_path)
+    try:
+        lang_label = f" (language: {language})" if language else ""
+        print(f"  Sending to Groq whisper-large-v3-turbo{lang_label}…")
+        client = Groq(api_key=groq_key)
+        with open(upload_path, "rb") as f:
+            transcription = client.audio.transcriptions.create(
+                file=(os.path.basename(upload_path), f),
+                model="whisper-large-v3-turbo",
+                response_format="verbose_json",
+                timestamp_granularities=["segment"],
+                language=language,
+            )
+    finally:
+        if is_temp:
+            try:
+                os.unlink(upload_path)
+            except Exception:
+                pass
 
-    segments_iter, _info = model.transcribe(
-        audio_path,
-        language=language,
-        beam_size=5,
-        word_timestamps=False,
-    )
-
+    # ── Parse segments → Words ────────────────────────────────────────────── #
     words: list[Word] = []
-
-    for seg in segments_iter:
-        # faster-whisper segments have .words only when word_timestamps=True.
-        # Distribute segment time evenly across its words (same as before).
+    for seg in transcription.segments:
         raw_words = seg.text.strip().split()
         if not raw_words:
             continue
@@ -150,7 +188,6 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
     if audio_mtime is not None:
         try:
             cache_data = {
-                "model_size": model_size,
                 "audio_mtime": audio_mtime,
                 "words": [
                     {"text": w.text, "norm": w.norm,
@@ -162,7 +199,7 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
                 json.dump(cache_data, f, ensure_ascii=False)
             print(f"  Transcript cached → '{cache_path}'")
         except Exception:
-            pass  # non-fatal — caching is best-effort
+            pass
 
     return words
 

@@ -23,6 +23,13 @@ from flask import Flask, jsonify, render_template_string, request, send_file
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB upload limit
 
+if not os.environ.get("GROQ_API_KEY"):
+    print(
+        "\n⚠  WARNING: GROQ_API_KEY is not set — transcription will fail.\n"
+        "   Get a free key at https://console.groq.com\n"
+        "   Then restart with:  GROQ_API_KEY=gsk_... python app.py\n"
+    )
+
 # In-memory job store  {job_id: {...}}
 jobs: dict = {}
 
