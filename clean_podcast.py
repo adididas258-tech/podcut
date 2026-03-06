@@ -68,6 +68,11 @@ class Segment:
 CHUNK_SEC = 600  # 10-minute chunks for parallel transcription
 
 
+def _seg(s, attr):
+    """Get a segment attribute whether s is an object or a dict (groq SDK varies)."""
+    return s[attr] if isinstance(s, dict) else getattr(s, attr)
+
+
 def _audio_duration(audio_path: str) -> float:
     """Return duration in seconds via ffprobe, or estimate from file size."""
     try:
@@ -118,16 +123,17 @@ def _transcribe_chunk(client, audio_path: str, start: float, duration: float,
 
     words: list[Word] = []
     for seg in tr.segments:
-        raw_words = seg.text.strip().split()
+        raw_words = _seg(seg, "text").strip().split()
         if not raw_words:
             continue
-        step = (seg.end - seg.start) / len(raw_words)
+        seg_start, seg_end = _seg(seg, "start"), _seg(seg, "end")
+        step = (seg_end - seg_start) / len(raw_words)
         for i, raw in enumerate(raw_words):
             words.append(Word(
                 text=raw,
                 norm=_normalize(raw),
-                start=start + seg.start + i * step,
-                end=start + seg.start + (i + 1) * step,
+                start=start + seg_start + i * step,
+                end=start + seg_start + (i + 1) * step,
             ))
     return words
 
@@ -259,16 +265,17 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
                     pass
         words = []
         for seg in tr.segments:
-            raw_words = seg.text.strip().split()
+            raw_words = _seg(seg, "text").strip().split()
             if not raw_words:
                 continue
-            step = (seg.end - seg.start) / len(raw_words)
+            seg_start, seg_end = _seg(seg, "start"), _seg(seg, "end")
+            step = (seg_end - seg_start) / len(raw_words)
             for i, raw in enumerate(raw_words):
                 words.append(Word(
                     text=raw,
                     norm=_normalize(raw),
-                    start=seg.start + i * step,
-                    end=seg.start + (i + 1) * step,
+                    start=seg_start + i * step,
+                    end=seg_start + (i + 1) * step,
                 ))
         if progress_callback:
             progress_callback(1, 1)
