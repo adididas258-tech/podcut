@@ -65,6 +65,10 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
     """
     Run Whisper on the audio file and return every word with its timestamp.
 
+    Results are cached to a JSON sidecar file (``<audio>.whisper_cache.json``)
+    so that repeat runs with the same audio file and model skip the expensive
+    transcription step entirely.
+
     Uses segment-level timestamps (word_timestamps=False) and distributes
     each segment's time span evenly across its words.  This is significantly
     faster than DTW word-alignment (word_timestamps=True), which can take
@@ -81,6 +85,25 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
     Returns:
         List of Word objects ordered by time.
     """
+    # ── Cache check ──────────────────────────────────────────────────────── #
+    cache_path = audio_path + ".whisper_cache.json"
+    try:
+        audio_mtime = os.path.getmtime(audio_path)
+    except OSError:
+        audio_mtime = None
+
+    if os.path.isfile(cache_path) and audio_mtime is not None:
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                cached = json.load(f)
+            if (cached.get("model_size") == model_size
+                    and abs(cached.get("audio_mtime", 0) - audio_mtime) < 1):
+                words = [Word(**w) for w in cached["words"]]
+                print(f"  Transcript loaded from cache ({len(words)} words).")
+                return words
+        except Exception:
+            pass  # corrupt cache — fall through to re-transcribe
+
     try:
         import whisper
     except ImportError:
@@ -135,6 +158,25 @@ def transcribe_audio(audio_path: str, model_size: str = "base",
                 ))
 
     print(f"  Transcription complete: {len(words)} words.")
+
+    # ── Save cache ────────────────────────────────────────────────────────── #
+    if audio_mtime is not None:
+        try:
+            cache_data = {
+                "model_size": model_size,
+                "audio_mtime": audio_mtime,
+                "words": [
+                    {"text": w.text, "norm": w.norm,
+                     "start": w.start, "end": w.end}
+                    for w in words
+                ],
+            }
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, ensure_ascii=False)
+            print(f"  Transcript cached → '{cache_path}'")
+        except Exception:
+            pass  # non-fatal — caching is best-effort
+
     return words
 
 
@@ -379,13 +421,17 @@ def _find_all_windows(
             if end > len(norm_transcript):
                 break
             window_str = " ".join(norm_transcript[i:end])
-            score = fuzz.ratio(sent_str, window_str)
+            score = fuzz.ratio(sent_str, window_str, score_cutoff=best_score)
             if score > best_score:
                 best_score = score
                 best_end = end
+                if best_score == 100:
+                    break  # perfect match — no need to try wider windows
 
         if best_score >= threshold:
             matches.append((i, best_end, best_score))
+            if best_score == 100:
+                break  # exact match found — stop scanning
 
     return matches
 
