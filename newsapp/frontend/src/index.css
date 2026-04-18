@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html {
+    background-color: #0C0C0E;
+    color: #F0F0F2;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: #0C0C0E;
+    min-height: 100%;
+    overscroll-behavior: none;
+  }
+
+  #root {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  ::-webkit-scrollbar { width: 0; background: transparent; }
+}
+
+@layer components {
+  .safe-top { padding-top: env(safe-area-inset-top, 0px); }
+  .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 16px); }
+
+  .skeleton {
+    background: linear-gradient(90deg, #1E1E24 25%, #2A2A32 50%, #1E1E24 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px;
+  }
+
+  .card-press {
+    transition: transform 0.12s ease, opacity 0.12s ease;
+  }
+  .card-press:active {
+    transform: scale(0.98);
+    opacity: 0.85;
+  }
+
+  .tag {
+    @apply text-xs font-medium px-2 py-0.5 rounded-full border;
+  }
+
+  .sentiment-positive { @apply text-positive border-positive/30 bg-positive/10; }
+  .sentiment-negative { @apply text-negative border-negative/30 bg-negative/10; }
+  .sentiment-neutral { @apply text-neutral border-neutral/30 bg-neutral/10; }
+  .sentiment-mixed { @apply text-mixed border-mixed/30 bg-mixed/10; }
+}
+
+.bottom-sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: #141416;
+  border-top: 1px solid #1E1E24;
+  border-radius: 20px 20px 0 0;
+  animation: slideUp 0.4s cubic-bezier(0.16,1,0.3,1);
+  max-height: 92dvh;
+  overflow-y: auto;
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 40;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+@keyframes slideUp { from { transform: translateY(100%) } to { transform: translateY(0) } }
+@keyframes shimmer {
+  0% { background-position: -200% 0 }
+  100% { background-position: 200% 0 }
+}
